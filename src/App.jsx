@@ -4,7 +4,6 @@ import { ToastProvider } from './components/UI'
 import { supabase, isConfigured } from './lib/supabase'
 import { MOCK_ADMIN } from './lib/mock'
 
-import Landing       from './pages/Landing'
 import Login         from './pages/Login'
 import ForgotPassword from './pages/ForgotPassword'
 import Invite        from './pages/Invite'
@@ -84,7 +83,7 @@ export default function App() {
       <AuthProvider>
         <ToastProvider>
           <Routes>
-            <Route path="/" element={<Landing />} />
+            <Route path="/" element={<Navigate to="/login" replace />} />
             <Route path="/login" element={<Login />} />
             <Route path="/forgot-password" element={<ForgotPassword />} />
             <Route path="/invite" element={<Invite />} />
