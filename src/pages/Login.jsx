@@ -249,9 +249,9 @@ export default function Login() {
 
           <p style={{ textAlign: 'center', marginTop: 24, fontSize: t.textBase, color: t.textMuted, fontFamily: t.font }}>
             Don&apos;t have access?{' '}
-            <Link to="/" style={{ color: t.accent, fontWeight: 500, textDecoration: 'none' }}>
+            <a href="https://upranked.co" style={{ color: t.accent, fontWeight: 500, textDecoration: 'none' }}>
               Learn more
-            </Link>
+            </a>
           </p>
         </div>
       </div>
