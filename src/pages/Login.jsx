@@ -12,7 +12,7 @@ export default function Login() {
   const [loading, setLoading]   = useState(false)
   const navigate = useNavigate()
   const toast    = useToast()
-  const { setMockAuth } = useAuth()
+  const { setMockAuth, setAuthDirect } = useAuth()
 
   const handleSubmit = async e => {
     e.preventDefault()
@@ -63,32 +63,37 @@ export default function Login() {
       )
       if (error) throw error
 
-      // Persist the fresh session into the main client's storage slot.
-      // The main client will pick this up on the next page load.
+      // Persist the session into the main client's localStorage slot so it
+      // survives page reloads and the auto-refresh timer can find it.
       if (SUPABASE_AUTH_KEY && data.session) {
         try { localStorage.setItem(SUPABASE_AUTH_KEY, JSON.stringify(data.session)) } catch {}
       }
 
-      // Determine role using the login client (it has the session in memory).
-      let role = null
+      // Fetch the full profile via the login client (it holds the session in
+      // memory even with persistSession:false, so RLS headers are correct).
+      let prof = null
       try {
-        const { data: prof } = await withTimeout(
-          loginClient.from('profiles').select('role').eq('id', data.user.id).single(),
+        const { data: profData } = await withTimeout(
+          loginClient.from('profiles').select('*').eq('id', data.user.id).single(),
           8000, 'Profile lookup'
         )
-        role = prof?.role || null
+        prof = profData || null
       } catch {
-        console.warn('[Login] profile fetch failed, defaulting to client')
+        console.warn('[Login] profile fetch timed out or failed')
       }
 
-      // Hard navigate (full page reload) so the main Supabase client starts
-      // completely fresh and reads the session we just stored. This guarantees
-      // no stuck lock state carries over from the previous client instance.
-      // Also clear the reload-loop counter so the next auth timeout can self-heal.
+      // Set user + profile atomically in the auth context BEFORE navigating.
+      //
+      // RequireAuth checks both `user` and `profile` on every render. If we
+      // navigate and rely on the async onAuthStateChange → loadProfile path,
+      // RequireAuth will see user≠null but profile=null for the brief window
+      // between setUser() and the DB call completing, and will immediately
+      // redirect back to /login. setAuthDirect sets both in one call so React
+      // flushes a single consistent render with both values present.
+      setAuthDirect(data.user, prof)
+
       try { sessionStorage.removeItem('_auth_timeout_reloads') } catch {}
-      window.location.href = role === 'admin' ? '/admin' : '/dashboard'
-      // No finally needed for the success path — the page navigates away.
-      return
+      navigate(prof?.role === 'admin' ? '/admin' : '/dashboard')
 
     } catch (err) {
       toast(err.message || 'Sign in failed', 'danger')
@@ -96,6 +101,7 @@ export default function Login() {
       setLoading(false)
     }
   }
+
 
   return (
     <div style={{

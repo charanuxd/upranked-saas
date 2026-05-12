@@ -134,6 +134,16 @@ function AuthProvider({ children }) {
     }
   }
 
+  // Set user and profile atomically after a real login.
+  // Called by Login.jsx so that both values are present in the same React
+  // render cycle before React Router navigates to a protected route.
+  // Without this, RequireAuth renders with user≠null but profile=null
+  // (loadProfile is async) and immediately redirects back to /login.
+  function setAuthDirect(u, prof) {
+    setUser(u)
+    setProfile(prof)
+  }
+
   function signOut() {
     if (isConfigured) supabase.auth.signOut()
     setUser(null)
@@ -141,7 +151,7 @@ function AuthProvider({ children }) {
   }
 
   return (
-    <AuthContext.Provider value={{ user, profile, loading, setMockAuth, signOut }}>
+    <AuthContext.Provider value={{ user, profile, loading, setMockAuth, setAuthDirect, signOut }}>
       {children}
     </AuthContext.Provider>
   )
