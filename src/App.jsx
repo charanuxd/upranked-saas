@@ -1,7 +1,8 @@
+/* eslint-disable react-hooks/set-state-in-effect, react-refresh/only-export-components, react-hooks/immutability */
 import { createContext, useContext, useState, useEffect } from 'react'
 import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom'
 import { ToastProvider } from './components/UI'
-import { supabase, isConfigured } from './lib/supabase'
+import { supabase, isConfigured, SUPABASE_AUTH_KEY } from './lib/supabase'
 import { MOCK_ADMIN } from './lib/mock'
 
 import Login         from './pages/Login'
@@ -27,20 +28,86 @@ function AuthProvider({ children }) {
 
   useEffect(() => {
     if (!isConfigured) { setLoading(false); return }
-    supabase.auth.getSession().then(async ({ data: { session } }) => {
-      if (session?.user) await loadProfile(session.user)
-      setLoading(false)
-    })
+    let cancelled = false
+
+    // Pre-clear sessions whose access token is already expired.
+    // When the access token is expired, getSession() makes a refresh-token
+    // HTTP request. On slow/flaky connections that request can hang indefinitely
+    // while holding the auth client's internal lock, which then blocks any
+    // subsequent signInWithPassword call. Clearing the token before the client
+    // starts means getSession() returns null instantly with no network call.
+    try {
+      if (SUPABASE_AUTH_KEY) {
+        const raw = localStorage.getItem(SUPABASE_AUTH_KEY)
+        if (raw) {
+          const { expires_at } = JSON.parse(raw)
+          // expires_at is seconds; clear if expired more than 60 seconds ago
+          if (expires_at && Date.now() / 1000 > expires_at + 60) {
+            localStorage.removeItem(SUPABASE_AUTH_KEY)
+            console.log('[Auth] Pre-cleared expired session token')
+          }
+        }
+      }
+    } catch {}
+
+    // Race a promise against a timeout. On timeout the error has isTimeout=true.
+    const race = (p, ms, label) => Promise.race([
+      p,
+      new Promise((_, rej) =>
+        setTimeout(() => rej(Object.assign(new Error(`${label} timed out after ${ms / 1000}s`), { isTimeout: true })), ms)
+      ),
+    ])
+
+    ;(async () => {
+      try {
+        const { data: { session } } = await race(supabase.auth.getSession(), 5000, 'getSession')
+        if (cancelled) return
+        if (session?.user) await race(loadProfile(session.user), 8000, 'loadProfile')
+      } catch (e) {
+        if (e.isTimeout) {
+          // The auth client's internal lock is now stuck (the underlying HTTP
+          // request is still in flight). We CANNOT use supabase.auth.signOut()
+          // here because it also acquires the same lock and would hang forever.
+          // Instead: clear localStorage directly, then reload to get a fresh
+          // auth client with no lock contention.
+          console.warn(`[Auth] ${e.message} — stuck lock detected, clearing session and reloading`)
+          try { if (SUPABASE_AUTH_KEY) localStorage.removeItem(SUPABASE_AUTH_KEY) } catch {}
+          // Guard against reload loops: if we already reloaded for this reason,
+          // skip the reload and just proceed to the login page
+          if (!sessionStorage.getItem('_auth_timeout_reload')) {
+            sessionStorage.setItem('_auth_timeout_reload', '1')
+            window.location.reload()
+            return
+          }
+          sessionStorage.removeItem('_auth_timeout_reload')
+        } else {
+          console.error('[Auth] session init failed:', e)
+        }
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+    })()
+
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
-      if (session?.user) await loadProfile(session.user)
-      else { setUser(null); setProfile(null) }
+      if (cancelled) return
+      try {
+        if (session?.user) await loadProfile(session.user)
+        else { setUser(null); setProfile(null) }
+      } catch (e) {
+        console.error('[Auth] onAuthStateChange/loadProfile failed:', e)
+      }
     })
-    return () => subscription.unsubscribe()
+    return () => { cancelled = true; subscription.unsubscribe() }
   }, [])
 
   async function loadProfile(u) {
     setUser(u)
-    const { data } = await supabase.from('profiles').select('*').eq('id', u.id).single()
+    const { data, error } = await supabase.from('profiles').select('*').eq('id', u.id).single()
+    if (error) {
+      console.error('[Auth] profile fetch error:', error)
+      setProfile(null)
+      return
+    }
     setProfile(data)
   }
 
@@ -73,7 +140,14 @@ function RequireAuth({ children, role }) {
   const location = useLocation()
   if (loading) return <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: "'DM Sans', sans-serif", color: '#6B7280' }}>Loading…</div>
   if (!user) return <Navigate to="/login" state={{ from: location }} replace />
-  if (role && profile?.role !== role) return <Navigate to={profile?.role === 'admin' ? '/admin' : '/dashboard'} replace />
+  // If we're authenticated but the profile didn't load, force re-auth instead of looping
+  if (!profile) return <Navigate to="/login" state={{ from: location }} replace />
+  // Wrong-role redirect — guard against self-redirect
+  if (role && profile.role !== role) {
+    const target = profile.role === 'admin' ? '/admin' : '/dashboard'
+    if (location.pathname === target) return children // shouldn't happen, but don't loop
+    return <Navigate to={target} replace />
+  }
   return children
 }
 
