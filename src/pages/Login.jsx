@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { useNavigate, Link } from 'react-router-dom'
 import { t } from '../lib/theme'
 import { Button, useToast } from '../components/UI'
-import { supabase, isConfigured } from '../lib/supabase'
+import { createLoginClient, isConfigured, SUPABASE_AUTH_KEY } from '../lib/supabase'
 import { useAuth } from '../App'
 import { Envelope, Lock, ArrowRight } from '@phosphor-icons/react'
 
@@ -17,6 +17,7 @@ export default function Login() {
   const handleSubmit = async e => {
     e.preventDefault()
     setLoading(true)
+
     try {
       if (!isConfigured) {
         if (email === 'admin@upranked.co' && password === 'demo') {
@@ -34,32 +35,61 @@ export default function Login() {
         new Promise((_, rej) => setTimeout(() => rej(new Error(`${label} timed out`)), ms))
       ])
 
+      // Quick connectivity check before attempting sign-in.
       try {
         await withTimeout(
-          fetch(`https://cnqobihoukbsxwyemrbm.supabase.co/auth/v1/health`, { method: 'GET', cache: 'no-store' }),
+          fetch('https://cnqobihoukbsxwyemrbm.supabase.co/auth/v1/health', { method: 'GET', cache: 'no-store' }),
           4000, 'Connectivity check'
         )
       } catch {
         throw new Error("Can't reach Upranked servers. Try a Private / Incognito window — a browser extension may be blocking the connection.")
       }
 
+      // Use an isolated client for sign-in.
+      //
+      // The main supabase client may have a stuck internal lock: if the app
+      // initialised with an expired session, getSession() made a refresh HTTP
+      // call that is still in flight holding the lock. signInWithPassword()
+      // on the same client would block on that lock until our timeout fires.
+      //
+      // createLoginClient() creates a client with a unique storageKey, giving
+      // it its own independent lock. It finds no session in its private storage
+      // slot so getSession() returns instantly and signInWithPassword() runs
+      // immediately with zero lock contention.
+      const loginClient = createLoginClient()
       const { data, error } = await withTimeout(
-        supabase.auth.signInWithPassword({ email, password }),
-        20000, 'Sign-in'
+        loginClient.auth.signInWithPassword({ email, password }),
+        15000, 'Sign-in'
       )
       if (error) throw error
 
+      // Persist the fresh session into the main client's storage slot.
+      // The main client will pick this up on the next page load.
+      if (SUPABASE_AUTH_KEY && data.session) {
+        try { localStorage.setItem(SUPABASE_AUTH_KEY, JSON.stringify(data.session)) } catch {}
+      }
+
+      // Determine role using the login client (it has the session in memory).
       let role = null
       try {
-        const { data: profile } = await withTimeout(
-          supabase.from('profiles').select('role').eq('id', data.user.id).single(),
-          10000, 'Profile lookup'
+        const { data: prof } = await withTimeout(
+          loginClient.from('profiles').select('role').eq('id', data.user.id).single(),
+          8000, 'Profile lookup'
         )
-        role = profile?.role || null
+        role = prof?.role || null
       } catch {
         console.warn('[Login] profile fetch failed, defaulting to client')
       }
-      navigate(role === 'admin' ? '/admin' : '/dashboard')
+
+      // Hard navigate (full page reload) so the main Supabase client starts
+      // completely fresh and reads the session we just stored. This guarantees
+      // no stuck lock state carries over from the previous client instance.
+      // Also clear the reload-loop counter so the next auth timeout can self-heal.
+      try { sessionStorage.removeItem('_auth_timeout_reloads') } catch {}
+      window.location.href = role === 'admin' ? '/admin' : '/dashboard'
+      // No finally needed for the success path — the page navigates away.
+      return
+
     } catch (err) {
       toast(err.message || 'Sign in failed', 'danger')
     } finally {

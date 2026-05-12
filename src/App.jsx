@@ -30,21 +30,24 @@ function AuthProvider({ children }) {
     if (!isConfigured) { setLoading(false); return }
     let cancelled = false
 
-    // Pre-clear sessions whose access token is already expired.
-    // When the access token is expired, getSession() makes a refresh-token
-    // HTTP request. On slow/flaky connections that request can hang indefinitely
-    // while holding the auth client's internal lock, which then blocks any
-    // subsequent signInWithPassword call. Clearing the token before the client
-    // starts means getSession() returns null instantly with no network call.
+    // Pre-clear sessions whose access token is expired (or will expire within
+    // 30 seconds). getSession() refreshes expired tokens over HTTP while holding
+    // the internal lock. If that HTTP call hangs, the lock never releases and
+    // signInWithPassword blocks until our timeout fires. Clearing the entry
+    // before the Supabase client touches it means getSession() reads null,
+    // returns immediately, and the lock is never held for long.
+    //
+    // Threshold is -30s (clear if expiry is less than 30 seconds away).
+    // Valid sessions with plenty of time left are untouched so auto-refresh
+    // works normally for active users.
     try {
       if (SUPABASE_AUTH_KEY) {
         const raw = localStorage.getItem(SUPABASE_AUTH_KEY)
         if (raw) {
           const { expires_at } = JSON.parse(raw)
-          // expires_at is seconds; clear if expired more than 60 seconds ago
-          if (expires_at && Date.now() / 1000 > expires_at + 60) {
+          if (expires_at && Date.now() / 1000 >= expires_at - 30) {
             localStorage.removeItem(SUPABASE_AUTH_KEY)
-            console.log('[Auth] Pre-cleared expired session token')
+            console.log('[Auth] Pre-cleared expired/near-expired session token')
           }
         }
       }
@@ -62,24 +65,33 @@ function AuthProvider({ children }) {
       try {
         const { data: { session } } = await race(supabase.auth.getSession(), 5000, 'getSession')
         if (cancelled) return
+        // Successful init -- clear any previous reload-loop counter
+        try { sessionStorage.removeItem('_auth_timeout_reloads') } catch {}
         if (session?.user) await race(loadProfile(session.user), 8000, 'loadProfile')
       } catch (e) {
         if (e.isTimeout) {
-          // The auth client's internal lock is now stuck (the underlying HTTP
-          // request is still in flight). We CANNOT use supabase.auth.signOut()
-          // here because it also acquires the same lock and would hang forever.
-          // Instead: clear localStorage directly, then reload to get a fresh
-          // auth client with no lock contention.
-          console.warn(`[Auth] ${e.message} — stuck lock detected, clearing session and reloading`)
+          // getSession() timed out. The underlying HTTP refresh request is still
+          // in flight holding the internal lock. We cannot call signOut() because
+          // it also acquires the same lock. Instead:
+          //   1. Clear localStorage directly (no lock required).
+          //   2. Reload the page to get a completely fresh JS runtime and auth
+          //      client with no in-flight requests or held locks.
+          //
+          // Loop guard: track how many times we've reloaded for this reason.
+          // If it happens more than once in a row, stop reloading and show
+          // the login page so the user can manually sign in.
+          console.warn(`[Auth] ${e.message} — stuck lock detected, clearing session`)
           try { if (SUPABASE_AUTH_KEY) localStorage.removeItem(SUPABASE_AUTH_KEY) } catch {}
-          // Guard against reload loops: if we already reloaded for this reason,
-          // skip the reload and just proceed to the login page
-          if (!sessionStorage.getItem('_auth_timeout_reload')) {
-            sessionStorage.setItem('_auth_timeout_reload', '1')
+          const reloadCount = Number(sessionStorage.getItem('_auth_timeout_reloads') || '0')
+          if (reloadCount < 2) {
+            sessionStorage.setItem('_auth_timeout_reloads', String(reloadCount + 1))
             window.location.reload()
             return
           }
-          sessionStorage.removeItem('_auth_timeout_reload')
+          // Two reloads already tried -- something else is wrong (extension
+          // blocking requests, Supabase down, etc.). Fall through to login.
+          console.warn('[Auth] Reload loop guard hit — proceeding to login without reload')
+          sessionStorage.removeItem('_auth_timeout_reloads')
         } else {
           console.error('[Auth] session init failed:', e)
         }
