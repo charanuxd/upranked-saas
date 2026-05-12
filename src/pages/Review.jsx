@@ -1,3 +1,4 @@
+/* eslint-disable react-hooks/set-state-in-effect */
 import { useState, useEffect } from 'react'
 import { useParams } from 'react-router-dom'
 import { t } from '../lib/theme'
@@ -9,6 +10,7 @@ import { MOCK_CLIENTS } from '../lib/mock'
 export default function Review() {
   const { slug } = useParams()
   const [client, setClient]     = useState(null)
+  const [notFound, setNotFound] = useState(false)
   const [step, setStep]         = useState('rating') // rating | low | high | done
   const [rating, setRating]     = useState(0)
   const [feedback, setFeedback] = useState('')
@@ -19,11 +21,15 @@ export default function Review() {
   useEffect(() => {
     if (!isConfigured) {
       const c = MOCK_CLIENTS.find(c => c.review_slug === slug)
-      setClient(c || null)
+      if (c) setClient(c); else setNotFound(true)
       return
     }
-    supabase.from('clients').select('id, business_name, google_profile_url').eq('review_slug', slug).single()
-      .then(({ data }) => setClient(data))
+    supabase.rpc('get_client_by_slug', { p_slug: slug })
+      .then(({ data, error }) => {
+        if (error || !data || data.length === 0) setNotFound(true)
+        else setClient(data[0])
+      })
+      .catch(() => setNotFound(true))
   }, [slug])
 
   function handleRating(r) {
@@ -36,23 +42,40 @@ export default function Review() {
     e.preventDefault()
     setLoading(true)
     try {
-      if (isConfigured && client) {
-        await supabase.from('reviews').insert({
-          client_id: client.id,
-          reviewer_name: name || 'Anonymous',
-          star_rating: rating,
-          review_text: feedback,
-          source: 'direct',
-          review_date: new Date().toISOString().slice(0, 10),
+      if (isConfigured) {
+        const { error } = await supabase.rpc('submit_review', {
+          p_slug: slug,
+          p_rating: rating,
+          p_text: feedback,
+          p_name: name,
+          p_source: 'private',
         })
+        if (error) throw error
       }
       setStep('done')
-    } catch {
-      toast('Something went wrong. Please try again.', 'danger')
+    } catch (err) {
+      toast(err?.message || 'Something went wrong. Please try again.', 'danger')
     } finally {
       setLoading(false)
     }
   }
+
+  async function handleGoogleClick() {
+    // Track the click; don't block navigation if it fails
+    if (isConfigured) {
+      supabase.rpc('log_google_review_click', { p_slug: slug }).catch(() => {})
+    }
+    setStep('done')
+  }
+
+  if (notFound) return (
+    <div style={{ minHeight: '100vh', background: t.bg, display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: t.fontBody }}>
+      <div style={{ textAlign: 'center', padding: 24 }}>
+        <h2 style={{ fontFamily: t.fontHeading, color: t.text }}>Review page not found</h2>
+        <p style={{ color: t.textMuted, marginTop: 8 }}>This link may be expired or incorrect.</p>
+      </div>
+    </div>
+  )
 
   if (!client) return (
     <div style={{ minHeight: '100vh', background: t.bg, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
@@ -88,11 +111,15 @@ export default function Review() {
               <p style={{ fontSize: 14, color: t.textMuted, lineHeight: 1.6 }}>
                 Would you mind sharing that on Google? It only takes 30 seconds and helps other customers find us.
               </p>
-              <a href={client.google_profile_url || '#'} target="_blank" rel="noreferrer" onClick={() => setStep('done')}>
-                <Button fullWidth size="lg" style={{ background: '#4285F4' }}>
-                  Leave a Google Review ↗
-                </Button>
-              </a>
+              {client.google_profile_url ? (
+                <a href={client.google_profile_url} target="_blank" rel="noreferrer" onClick={handleGoogleClick}>
+                  <Button fullWidth size="lg" style={{ background: '#4285F4' }}>
+                    Leave a Google Review ↗
+                  </Button>
+                </a>
+              ) : (
+                <Button fullWidth size="lg" disabled>Google profile not configured</Button>
+              )}
               <button onClick={() => setStep('done')} style={{ background: 'none', border: 'none', fontSize: 13, color: t.textMuted, cursor: 'pointer' }}>
                 Maybe later
               </button>
@@ -124,6 +151,7 @@ export default function Review() {
                   placeholder="Tell us what happened…"
                   rows={4}
                   required
+                  maxLength={5000}
                   style={{ width: '100%', border: `1px solid ${t.border}`, borderRadius: t.radiusSm, padding: '10px 12px', fontSize: 14, fontFamily: t.fontBody, color: t.text, background: t.bg, outline: 'none', resize: 'vertical' }}
                 />
               </div>
