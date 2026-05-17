@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import { t, statusBadge } from '../../lib/theme'
-import { supabase, isConfigured } from '../../lib/supabase'
+import { supabase, isConfigured, invokeFn } from '../../lib/supabase'
 import { MOCK_CLIENTS } from '../../lib/mock'
 import { Button, Badge, Modal, useToast, PageHeader, SearchInput, Select } from '../../components/UI'
 import {
@@ -137,11 +137,11 @@ export default function Clients() {
         toast(`Demo: invite would be sent to ${inviteEmail}`, 'success')
         setShowInvite(null); setInviteEmail(''); return
       }
-      const { data, error } = await supabase.functions.invoke('invite-client', {
-        body: { client_id: showInvite.id, email: inviteEmail, redirect_to: `${window.location.origin}/invite` },
+      const data = await invokeFn('invite-client', {
+        client_id: showInvite.id,
+        email: inviteEmail,
+        redirect_to: `${window.location.origin}/invite`,
       })
-      if (error) throw new Error(error.message || 'Invite failed')
-      if (data?.error) throw new Error(data.error)
       toast(data?.message || `Invite sent to ${inviteEmail}`, 'success')
       setShowInvite(null); setInviteEmail('')
       await load()

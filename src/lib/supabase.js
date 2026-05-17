@@ -37,3 +37,49 @@ export function createLoginClient() {
     },
   })
 }
+
+// Invoke a Supabase Edge Function without going through the main client's
+// GoTrue internal lock.
+//
+// supabase.functions.invoke() calls supabase.auth.getSession() internally
+// to attach the Bearer token. getSession() acquires the GoTrue lock --
+// if the lock is held by a stuck background refresh call, invoke() hangs
+// indefinitely and the UI freezes with no error.
+//
+// This helper reads the access token directly from localStorage (same slot
+// we write to after login) and calls fetch() directly, bypassing the lock
+// entirely. Includes a configurable timeout via AbortController.
+export async function invokeFn(name, body, timeoutMs = 20000) {
+  if (!isConfigured) throw new Error('Supabase not configured')
+
+  let accessToken = null
+  try {
+    const raw = localStorage.getItem(SUPABASE_AUTH_KEY)
+    if (raw) accessToken = JSON.parse(raw)?.access_token
+  } catch { /* localStorage unavailable */ }
+  if (!accessToken) throw new Error('Not authenticated. Please sign in again.')
+
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+
+  try {
+    const res = await fetch(`${url}/functions/v1/${name}`, {
+      method: 'POST',
+      signal: controller.signal,
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${accessToken}`,
+        'apikey': key,
+      },
+      body: JSON.stringify(body),
+    })
+    const data = await res.json()
+    if (!res.ok) throw new Error(data?.error || `Request failed (HTTP ${res.status})`)
+    return data
+  } catch (err) {
+    if (err.name === 'AbortError') throw new Error('Request timed out. Check your connection and try again.')
+    throw err
+  } finally {
+    clearTimeout(timer)
+  }
+}
